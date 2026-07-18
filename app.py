@@ -94,8 +94,25 @@ st.markdown("""
     #MainMenu, footer {visibility: hidden;}
 
     /* ---------- Native Streamlit header / deploy button ---------- */
+    /* Hide only the hamburger menu and deploy button. The sidebar's
+       re-expand button (stExpandSidebarButton) lives inside the same
+       stToolbar container, so stToolbar itself must stay visible --
+       display:none on the whole toolbar/header made it impossible to
+       bring a collapsed sidebar back (verified against the installed
+       Streamlit build's testids: stMainMenu, stAppDeployButton,
+       stExpandSidebarButton). */
     header[data-testid="stHeader"] {
+        background: transparent;
+        box-shadow: none;
+    }
+    [data-testid="stMainMenu"],
+    [data-testid="stAppDeployButton"] {
         display: none;
+    }
+    [data-testid="stExpandSidebarButton"] {
+        display: flex !important;
+        visibility: visible !important;
+        opacity: 1 !important;
     }
     .block-container, [data-testid="stAppViewBlockContainer"] {
         padding-top: 0.8rem !important;
