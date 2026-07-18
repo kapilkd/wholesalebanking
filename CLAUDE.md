@@ -30,12 +30,16 @@ strictly limited to narrating retrieved facts.
 Wholesale_banking/
 ├── app.py                          # Streamlit UI: sidebar client lookup, 5 tabs, chat
 ├── config/
-│   └── langchain_config.py         # get_llm() factory (OpenAI via LangChain)
+│   ├── langchain_config.py         # get_llm() factory (OpenAI via LangChain)
+│   └── db_config.py                # MySQL/MariaDB pooled connection factory (DB_* env vars)
 ├── src/
 │   ├── multi_agent_generator.py    # LangGraph 5-agent chain — currently 100% dummy-data generation
 │   ├── chatbot.py                  # Free-form chat assistant (no DB, no structured context)
 │   ├── chart_generator.py          # Plotly charts — currently hardcoded dummy data
+│   ├── db_reader.py                # Deterministic view-fetch layer + client/RM code resolution
 │   └── utils.py                    # client code validation/formatting
+├── scripts/
+│   └── seed_data.py                # One-shot seed for the `wholesale` DB (~250 clients)
 ├── DB-Design-Schema/                # Proposed SQL schema — see below
 │   ├── README.md                    # Index + conventions + cross-file relationship map
 │   ├── 00_Master_Tables.sql         # Shared masters (client, RM, branch, currency, product, ...)
@@ -50,7 +54,7 @@ Wholesale_banking/
 │       └── 01_CMS_Views.sql ... 06_RM_Discussion_Views.sql
 ├── PROJECT_SUMMARY.md               # Deep-dive on the current (dummy-data) architecture
 ├── UI_STRUCTURE_CHANGES.md
-└── requirements.txt                 # No DB driver present yet — see "Not yet implemented" below
+└── requirements.txt                 # incl. mysql-connector-python (DB driver)
 ```
 
 The 5 UI tabs map 1:1 to `DB-Design-Schema` files 02-06 (`app.py` doesn't yet
@@ -169,11 +173,28 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
 - **One tab, one file**: `DB-Design-Schema/*.sql` files never mix tab-specific
   tables; shared data lives in the masters file only.
 
+## Implemented so far (data path)
+
+- **Engine chosen: MySQL/MariaDB.** `config/db_config.py` provides a pooled
+  connection factory from `DB_*` env vars (see `.env.example`);
+  `DB-Design-Schema/MySQL_Deploy/` holds the engine-ready DDL;
+  `scripts/seed_data.py` seeds a moderate-volume `wholesale` database.
+- **`src/db_reader.py`** — the deterministic fetch layer:
+  `resolve_lookup_code()` validates an `APR_CLIENT_CODE` against
+  `CLIENT_MASTER` (unknown code → not-found, never an LLM guess) or resolves
+  an `RM_CODE` via `CLIENT_RM_MAPPING` to the RM's actively-mapped clients
+  (feeds the RM-search **client picker** — tab views are keyed by client
+  code only); `fetch_all_tab_data()` fetches every tab summary view plus all
+  six chart views in parallel and returns one JSON-safe,
+  `lower_snake_case` payload for the rules/narration steps.
+
 ## Not yet implemented
 
 - Rules layer (thresholds/filters between SQL fetch and LLM narration).
-- Actual DB connection: no driver in `requirements.txt`, no connection
-  string in `.env.example`. Engine choice is open.
+- Rewiring `src/multi_agent_generator.py` to narrate `db_reader` payloads
+  (low temperature) instead of inventing data.
+- Wiring `src/chart_generator.py` to `db_reader`'s chart data instead of
+  hardcoded arrays.
+- RM-search client-picker UX in `app.py` (data side exists in `db_reader`).
 - NL2SQL schema catalog / vector store for the chat assistant.
-- Wiring `src/chart_generator.py` to real data instead of hardcoded arrays.
 - A CMS tab in `app.py` (schema exists in `01_CMS.sql`, UI does not yet).
