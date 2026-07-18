@@ -1,0 +1,192 @@
+-- =============================================================================
+-- FILE:        Views/02_Asset_Base_Views.sql
+-- TAB:         Asset Base
+-- SOURCE TABLES: ../02_Asset_Base.sql, ../00_Master_Tables.sql
+-- SCOPE:       One summary view (1 row/client) + three chart views, one per
+--              chart in src/chart_generator.py's generate_asset_charts().
+-- OWNS:        VW_ASSET_BASE_SUMMARY, VW_ASSET_CATEGORY_BREAKDOWN,
+--              VW_ASSET_QUALITY_DISTRIBUTION, VW_ASSET_GROWTH_TREND
+--
+-- USAGE: views take no parameters; the app queries with a WHERE filter, e.g.:
+--     SELECT * FROM VW_ASSET_BASE_SUMMARY WHERE APR_CLIENT_CODE = ?
+--
+-- PORTABILITY NOTE: these views use window functions (ROW_NUMBER, SUM() OVER)
+-- and CTEs (WITH clauses) for the "latest snapshot per account" pattern --
+-- both are SQL:1999/SQL:2003 standard, supported by SQL Server 2012+,
+-- PostgreSQL, Oracle, and MySQL 8+. VW_ASSET_GROWTH_TREND uses
+-- EXTRACT(YEAR/MONTH FROM date), which is ANSI-standard but only available
+-- natively on SQL Server from the 2022 release onward -- earlier SQL Server
+-- versions would substitute DATEPART(yyyy, ...) / DATEPART(mm, ...).
+-- =============================================================================
+
+
+-- -----------------------------------------------------------------------------
+-- VW_ASSET_BASE_SUMMARY: 1 row per client. Aggregates across all asset
+-- accounts using the latest snapshot of ASSET_VALUE_HISTORY / ASSET_NPA_
+-- CLASSIFICATION per account, so it never double-counts history rows.
+-- -----------------------------------------------------------------------------
+CREATE VIEW VW_ASSET_BASE_SUMMARY AS
+WITH LATEST_VALUE AS (
+    SELECT ASSET_ACCOUNT_ID, ASSET_VALUE
+    FROM (
+        SELECT ASSET_ACCOUNT_ID, ASSET_VALUE,
+               ROW_NUMBER() OVER (PARTITION BY ASSET_ACCOUNT_ID ORDER BY AS_OF_DATE DESC) AS RN
+        FROM ASSET_VALUE_HISTORY
+    ) R
+    WHERE R.RN = 1
+),
+LATEST_NPA AS (
+    SELECT ASSET_ACCOUNT_ID, ASSET_CLASSIFICATION
+    FROM (
+        SELECT ASSET_ACCOUNT_ID, ASSET_CLASSIFICATION,
+               ROW_NUMBER() OVER (PARTITION BY ASSET_ACCOUNT_ID ORDER BY CLASSIFICATION_DATE DESC) AS RN
+        FROM ASSET_NPA_CLASSIFICATION
+    ) R
+    WHERE R.RN = 1
+),
+ACCOUNT_ROLLUP AS (
+    SELECT
+        AAM.APR_CLIENT_CODE,
+        COUNT(*) AS TOTAL_ASSET_ACCOUNTS,
+        SUM(LV.ASSET_VALUE) AS TOTAL_ASSET_VALUE,
+        SUM(CASE WHEN LN.ASSET_CLASSIFICATION = 'Standard' THEN LV.ASSET_VALUE ELSE 0 END) AS STANDARD_VALUE,
+        SUM(CASE WHEN LN.ASSET_CLASSIFICATION = 'Sub-Standard' THEN LV.ASSET_VALUE ELSE 0 END) AS SUB_STANDARD_VALUE,
+        SUM(CASE WHEN LN.ASSET_CLASSIFICATION = 'Doubtful' THEN LV.ASSET_VALUE ELSE 0 END) AS DOUBTFUL_VALUE,
+        SUM(CASE WHEN LN.ASSET_CLASSIFICATION = 'Loss' THEN LV.ASSET_VALUE ELSE 0 END) AS LOSS_VALUE
+    FROM ASSET_ACCOUNT_MASTER AAM
+    LEFT JOIN LATEST_VALUE LV ON LV.ASSET_ACCOUNT_ID = AAM.ASSET_ACCOUNT_ID
+    LEFT JOIN LATEST_NPA LN ON LN.ASSET_ACCOUNT_ID = AAM.ASSET_ACCOUNT_ID
+    GROUP BY AAM.APR_CLIENT_CODE
+),
+LIMIT_ROLLUP AS (
+    SELECT
+        APR_CLIENT_CODE,
+        SUM(SANCTIONED_LIMIT_AMOUNT) AS TOTAL_SANCTIONED_LIMIT,
+        SUM(UTILIZED_LIMIT_AMOUNT) AS TOTAL_UTILIZED_LIMIT,
+        SUM(AVAILABLE_LIMIT_AMOUNT) AS TOTAL_AVAILABLE_LIMIT
+    FROM ASSET_SANCTION_LIMIT
+    GROUP BY APR_CLIENT_CODE
+),
+COLLATERAL_ROLLUP AS (
+    SELECT
+        APR_CLIENT_CODE,
+        SUM(COLLATERAL_VALUE) AS TOTAL_COLLATERAL_VALUE
+    FROM ASSET_COLLATERAL_MASTER
+    GROUP BY APR_CLIENT_CODE
+),
+COVENANT_ROLLUP AS (
+    SELECT
+        AAM.APR_CLIENT_CODE,
+        COUNT(*) AS COVENANT_BREACH_COUNT
+    FROM ASSET_COVENANT_MASTER CVN
+    JOIN ASSET_ACCOUNT_MASTER AAM ON AAM.ASSET_ACCOUNT_ID = CVN.ASSET_ACCOUNT_ID
+    WHERE CVN.COMPLIANCE_STATUS = 'Breach'
+    GROUP BY AAM.APR_CLIENT_CODE
+)
+SELECT
+    C.APR_CLIENT_CODE,
+    COALESCE(AR.TOTAL_ASSET_ACCOUNTS, 0)     AS TOTAL_ASSET_ACCOUNTS,
+    COALESCE(AR.TOTAL_ASSET_VALUE, 0)        AS TOTAL_ASSET_VALUE,
+    COALESCE(AR.STANDARD_VALUE, 0)           AS STANDARD_VALUE,
+    COALESCE(AR.SUB_STANDARD_VALUE, 0)       AS SUB_STANDARD_VALUE,
+    COALESCE(AR.DOUBTFUL_VALUE, 0)           AS DOUBTFUL_VALUE,
+    COALESCE(AR.LOSS_VALUE, 0)               AS LOSS_VALUE,
+    COALESCE(LR.TOTAL_SANCTIONED_LIMIT, 0)   AS TOTAL_SANCTIONED_LIMIT,
+    COALESCE(LR.TOTAL_UTILIZED_LIMIT, 0)     AS TOTAL_UTILIZED_LIMIT,
+    COALESCE(LR.TOTAL_AVAILABLE_LIMIT, 0)    AS TOTAL_AVAILABLE_LIMIT,
+    COALESCE(CR.TOTAL_COLLATERAL_VALUE, 0)   AS TOTAL_COLLATERAL_VALUE,
+    COALESCE(CV.COVENANT_BREACH_COUNT, 0)    AS COVENANT_BREACH_COUNT
+FROM CLIENT_MASTER C
+LEFT JOIN ACCOUNT_ROLLUP AR ON AR.APR_CLIENT_CODE = C.APR_CLIENT_CODE
+LEFT JOIN LIMIT_ROLLUP LR ON LR.APR_CLIENT_CODE = C.APR_CLIENT_CODE
+LEFT JOIN COLLATERAL_ROLLUP CR ON CR.APR_CLIENT_CODE = C.APR_CLIENT_CODE
+LEFT JOIN COVENANT_ROLLUP CV ON CV.APR_CLIENT_CODE = C.APR_CLIENT_CODE;
+
+
+-- -----------------------------------------------------------------------------
+-- VW_ASSET_CATEGORY_BREAKDOWN: 1 row per client+category. Feeds chart
+-- "Asset Category Breakdown" -- ASSET_CATEGORY values (Corporate Loans /
+-- Trade Finance / Investments / Securities / Cash & Equivalents) match the
+-- chart's hardcoded x-axis labels exactly (see ../02_Asset_Base.sql design note).
+-- -----------------------------------------------------------------------------
+CREATE VIEW VW_ASSET_CATEGORY_BREAKDOWN AS
+WITH LATEST_VALUE AS (
+    SELECT ASSET_ACCOUNT_ID, ASSET_VALUE
+    FROM (
+        SELECT ASSET_ACCOUNT_ID, ASSET_VALUE,
+               ROW_NUMBER() OVER (PARTITION BY ASSET_ACCOUNT_ID ORDER BY AS_OF_DATE DESC) AS RN
+        FROM ASSET_VALUE_HISTORY
+    ) R
+    WHERE R.RN = 1
+)
+SELECT
+    AAM.APR_CLIENT_CODE,
+    AAM.ASSET_CATEGORY,
+    SUM(LV.ASSET_VALUE) AS CATEGORY_VALUE
+FROM ASSET_ACCOUNT_MASTER AAM
+JOIN LATEST_VALUE LV ON LV.ASSET_ACCOUNT_ID = AAM.ASSET_ACCOUNT_ID
+GROUP BY AAM.APR_CLIENT_CODE, AAM.ASSET_CATEGORY;
+
+
+-- -----------------------------------------------------------------------------
+-- VW_ASSET_QUALITY_DISTRIBUTION: 1 row per client+classification. Feeds
+-- chart "Asset Quality Distribution" -- ASSET_CLASSIFICATION values
+-- (Standard / Sub-Standard / Doubtful / Loss) match the chart's hardcoded
+-- pie labels exactly. PERCENTAGE_OF_TOTAL is computed here (not left to the
+-- app) via a window function, matching the chart's percentage-based values.
+-- -----------------------------------------------------------------------------
+CREATE VIEW VW_ASSET_QUALITY_DISTRIBUTION AS
+WITH LATEST_VALUE AS (
+    SELECT ASSET_ACCOUNT_ID, ASSET_VALUE
+    FROM (
+        SELECT ASSET_ACCOUNT_ID, ASSET_VALUE,
+               ROW_NUMBER() OVER (PARTITION BY ASSET_ACCOUNT_ID ORDER BY AS_OF_DATE DESC) AS RN
+        FROM ASSET_VALUE_HISTORY
+    ) R
+    WHERE R.RN = 1
+),
+LATEST_NPA AS (
+    SELECT ASSET_ACCOUNT_ID, ASSET_CLASSIFICATION
+    FROM (
+        SELECT ASSET_ACCOUNT_ID, ASSET_CLASSIFICATION,
+               ROW_NUMBER() OVER (PARTITION BY ASSET_ACCOUNT_ID ORDER BY CLASSIFICATION_DATE DESC) AS RN
+        FROM ASSET_NPA_CLASSIFICATION
+    ) R
+    WHERE R.RN = 1
+),
+CLASSIFICATION_VALUE AS (
+    SELECT
+        AAM.APR_CLIENT_CODE,
+        LN.ASSET_CLASSIFICATION,
+        SUM(LV.ASSET_VALUE) AS OUTSTANDING_VALUE
+    FROM ASSET_ACCOUNT_MASTER AAM
+    JOIN LATEST_NPA LN ON LN.ASSET_ACCOUNT_ID = AAM.ASSET_ACCOUNT_ID
+    LEFT JOIN LATEST_VALUE LV ON LV.ASSET_ACCOUNT_ID = AAM.ASSET_ACCOUNT_ID
+    GROUP BY AAM.APR_CLIENT_CODE, LN.ASSET_CLASSIFICATION
+)
+SELECT
+    CV.APR_CLIENT_CODE,
+    CV.ASSET_CLASSIFICATION,
+    CV.OUTSTANDING_VALUE,
+    CASE
+        WHEN SUM(CV.OUTSTANDING_VALUE) OVER (PARTITION BY CV.APR_CLIENT_CODE) = 0 THEN 0
+        ELSE ROUND(100.0 * CV.OUTSTANDING_VALUE
+                   / SUM(CV.OUTSTANDING_VALUE) OVER (PARTITION BY CV.APR_CLIENT_CODE), 2)
+    END AS PERCENTAGE_OF_TOTAL
+FROM CLASSIFICATION_VALUE CV;
+
+
+-- -----------------------------------------------------------------------------
+-- VW_ASSET_GROWTH_TREND: 1 row per client+month. Feeds chart
+-- "Asset Growth Trend". No "latest snapshot" logic needed here -- unlike the
+-- other two chart views, this one deliberately sums the FULL history, since
+-- the whole point is the trend over time, not the current state.
+-- -----------------------------------------------------------------------------
+CREATE VIEW VW_ASSET_GROWTH_TREND AS
+SELECT
+    AVH.APR_CLIENT_CODE,
+    EXTRACT(YEAR FROM AVH.AS_OF_DATE)  AS TREND_YEAR,
+    EXTRACT(MONTH FROM AVH.AS_OF_DATE) AS TREND_MONTH,
+    SUM(AVH.ASSET_VALUE) AS TOTAL_ASSET_VALUE
+FROM ASSET_VALUE_HISTORY AVH
+GROUP BY AVH.APR_CLIENT_CODE, EXTRACT(YEAR FROM AVH.AS_OF_DATE), EXTRACT(MONTH FROM AVH.AS_OF_DATE);
