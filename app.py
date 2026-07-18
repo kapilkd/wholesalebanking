@@ -516,7 +516,8 @@ if st.session_state.client_code and st.session_state.summaries_generated and st.
         with col_text:
             st.markdown(f'<div class="summary-text">{st.session_state.client_summaries["asset_summary"]}</div>', unsafe_allow_html=True)
         with col_charts:
-            for chart in ChartGenerator.generate_asset_charts(st.session_state.client_code):
+            asset_charts = st.session_state.client_summaries["tab_data"]["asset_charts"]
+            for chart in ChartGenerator.generate_asset_charts(asset_charts):
                 st.plotly_chart(chart, use_container_width=True)
 
     with tab3:
@@ -528,7 +529,8 @@ if st.session_state.client_code and st.session_state.summaries_generated and st.
         with col_text:
             st.markdown(f'<div class="summary-text">{st.session_state.client_summaries["liability_summary"]}</div>', unsafe_allow_html=True)
         with col_charts:
-            for chart in ChartGenerator.generate_liability_charts(st.session_state.client_code):
+            liability_charts = st.session_state.client_summaries["tab_data"]["liability_charts"]
+            for chart in ChartGenerator.generate_liability_charts(liability_charts):
                 st.plotly_chart(chart, use_container_width=True)
 
     with tab4:
