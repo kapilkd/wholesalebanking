@@ -35,7 +35,7 @@ Wholesale_banking/
 ├── src/
 │   ├── multi_agent_generator.py    # LangGraph 5-agent chain — currently 100% dummy-data generation
 │   ├── chatbot.py                  # Free-form chat assistant (no DB, no structured context)
-│   ├── chart_generator.py          # Plotly charts — currently hardcoded dummy data
+│   ├── chart_generator.py          # Plotly charts built from db_reader chart-view payloads
 │   ├── db_reader.py                # Deterministic view-fetch layer + client/RM code resolution
 │   └── utils.py                    # client code validation/formatting
 ├── scripts/
@@ -196,11 +196,16 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
   `app.py` shows not-found, and RM codes show an interim notice until the
   client-picker UX lands.
 
+- **`src/chart_generator.py` renders `db_reader` chart payloads.** All six
+  charts take the `tab_data["asset_charts"]` / `tab_data["liability_charts"]`
+  rows fetched by `fetch_all_tab_data()` (`app.py` passes them through from
+  the summaries result — no refetch), with fixed bucket ordering matching
+  the seeded `MATURITY_BUCKET`/`RATE_BUCKET` labels and "No data available"
+  placeholders for empty row sets.
+
 ## Not yet implemented
 
 - Rules layer (thresholds/filters between SQL fetch and LLM narration).
-- Wiring `src/chart_generator.py` to `db_reader`'s chart data instead of
-  hardcoded arrays.
 - RM-search client-picker UX in `app.py` (data side exists in `db_reader`).
 - NL2SQL schema catalog / vector store for the chat assistant.
 - A CMS tab in `app.py` (schema exists in `01_CMS.sql`, UI does not yet).
