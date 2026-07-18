@@ -43,6 +43,12 @@ def _get_pool():
         user=user,
         password=password,
         database=database,
+        # Pure-Python protocol implementation. The C extension
+        # (_mysql_connector) bundles its own protobuf/SSL and is a known
+        # source of in-process conflicts with Streamlit's native stack
+        # (protobuf/pyarrow); this app's queries are client-scoped and
+        # small, so the C extension's speed advantage doesn't matter.
+        use_pure=True,
     )
     return _pool
 

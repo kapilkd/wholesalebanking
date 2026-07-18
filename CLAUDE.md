@@ -193,8 +193,16 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
   a strict never-invent narrator prompt. `generate_all_summaries()` keeps
   its old return keys (UI unchanged) and adds `tab_data` so charts/rules can
   reuse the fetch. Unknown codes raise `ValueError` before any LLM call;
-  `app.py` shows not-found, and RM codes show an interim notice until the
-  client-picker UX lands.
+  `app.py` shows not-found.
+- **RM-search client picker in `app.py`.** Submitting an `RM_CODE` resolves
+  via `db_reader.resolve_lookup_code()` to the RM's actively-mapped clients:
+  sidebar shows an RM card + client selectbox + load button, main area shows
+  an HTML overview table of the mapped clients (deliberately not
+  `st.dataframe` — see the `use_pure` note in `config/db_config.py`; the
+  picker table avoids Streamlit's pyarrow serialization path entirely).
+  Loading a picked client runs the normal client dashboard flow
+  (`load_client_dashboard()`), keeping the RM context chip; direct
+  APR-code lookups clear picker state.
 
 - **`src/chart_generator.py` renders `db_reader` chart payloads.** All six
   charts take the `tab_data["asset_charts"]` / `tab_data["liability_charts"]`
@@ -206,6 +214,5 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
 ## Not yet implemented
 
 - Rules layer (thresholds/filters between SQL fetch and LLM narration).
-- RM-search client-picker UX in `app.py` (data side exists in `db_reader`).
 - NL2SQL schema catalog / vector store for the chat assistant.
 - A CMS tab in `app.py` (schema exists in `01_CMS.sql`, UI does not yet).
