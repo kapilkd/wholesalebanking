@@ -3,6 +3,7 @@ Main Streamlit Application for Wholesale Banking Chatbot
 """
 import streamlit as st
 import sys
+from html import escape
 from pathlib import Path
 
 # Add src to path
@@ -13,6 +14,7 @@ from src.chatbot import WholesaleBankingChatbot
 from src.utils import validate_client_code, format_client_code
 from src.multi_agent_generator import MultiAgentSummaryGenerator
 from src.chart_generator import ChartGenerator
+from src import db_reader
 
 # Static wholesale banking summary text
 STATIC_WHOLESALE_INTRO = (
@@ -60,6 +62,47 @@ if "client_summaries" not in st.session_state:
     st.session_state.client_summaries = None
 if "summaries_generated" not in st.session_state:
     st.session_state.summaries_generated = False
+# RM-search client picker state (RM codes resolve to a list of mapped
+# clients — tab data itself is always keyed by APR_CLIENT_CODE)
+if "rm_code" not in st.session_state:
+    st.session_state.rm_code = None
+if "rm_name" not in st.session_state:
+    st.session_state.rm_name = None
+if "rm_clients" not in st.session_state:
+    st.session_state.rm_clients = None
+
+
+def load_client_dashboard(client_code: str):
+    """
+    Fetch + narrate summaries for one APR_CLIENT_CODE and refresh chat
+    context. Reruns only on success, so error messages stay visible.
+    """
+    if st.session_state.client_code != client_code or not st.session_state.summaries_generated:
+        st.session_state.client_code = client_code
+        st.session_state.code_type = "APR_CLIENT_CODE"
+
+        with st.spinner("Generating client summaries... This may take a minute."):
+            try:
+                generator = MultiAgentSummaryGenerator()
+                st.session_state.client_summaries = generator.generate_all_summaries(client_code)
+                st.session_state.summaries_generated = True
+            except ValueError as e:
+                # Raised by db_reader before any LLM call is made.
+                st.error(f"⚠️ {str(e)} — no matching client in the database.")
+                st.session_state.summaries_generated = False
+                return
+            except Exception as e:
+                st.error(f"Error generating summaries: {str(e)}. Please check your OpenAI API key and DB_* settings in the .env file.")
+                st.session_state.summaries_generated = False
+                return
+
+    if st.session_state.chatbot is None:
+        st.session_state.chatbot = WholesaleBankingChatbot(client_code)
+    else:
+        st.session_state.chatbot.update_client_code(client_code)
+
+    st.session_state.messages = []
+    st.rerun()
 
 # ----------------------------------------------------------------------------
 # Design system — ABC Bank brand (navy + red) on a modern fintech shell
@@ -249,6 +292,35 @@ st.markdown("""
         background: rgba(0,48,135,0.03);
     }
 
+    /* ---------- RM client-picker table ---------- */
+    .picker-table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(16, 24, 64, 0.06);
+        font-size: 0.9rem;
+        margin-bottom: 1.2rem;
+    }
+    .picker-table th {
+        background: var(--navy);
+        color: #ffffff;
+        text-align: left;
+        padding: 0.65rem 0.95rem;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+    }
+    .picker-table td {
+        padding: 0.55rem 0.95rem;
+        border-bottom: 1px solid var(--border);
+        color: var(--text-primary);
+    }
+    .picker-table tr:last-child td { border-bottom: none; }
+    .picker-table tr:hover td { background: rgba(0,48,135,0.05); }
+    .picker-table .code-cell { font-weight: 700; color: var(--navy); white-space: nowrap; }
+
     /* ---------- Status chips ---------- */
     .chip-row { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1rem; }
     .chip {
@@ -405,41 +477,38 @@ with st.sidebar:
 
     if submit_clicked:
         is_valid, code_type = validate_client_code(client_code_input)
-        if is_valid and code_type == "RM_CODE":
-            # Tab data is keyed by APR_CLIENT_CODE only; RM search resolves to
-            # the RM's mapped clients (db_reader.resolve_lookup_code) and will
-            # surface here as a client picker in an upcoming change.
-            st.warning("⚠️ RM-code search is being upgraded to a client picker. "
-                       "Until then, please enter an APR_CLIENT_CODE directly.")
-        elif is_valid:
-            formatted_code = format_client_code(client_code_input)
-
-            if st.session_state.client_code != formatted_code or not st.session_state.summaries_generated:
-                st.session_state.client_code = formatted_code
-                st.session_state.code_type = code_type
-
-                with st.spinner("Generating client summaries... This may take a minute."):
-                    try:
-                        generator = MultiAgentSummaryGenerator()
-                        st.session_state.client_summaries = generator.generate_all_summaries(formatted_code)
-                        st.session_state.summaries_generated = True
-                    except ValueError as e:
-                        # Raised by db_reader before any LLM call is made.
-                        st.error(f"⚠️ {str(e)} — no matching client in the database.")
-                        st.session_state.summaries_generated = False
-                    except Exception as e:
-                        st.error(f"Error generating summaries: {str(e)}. Please check your OpenAI API key and DB_* settings in the .env file.")
-                        st.session_state.summaries_generated = False
-
-            if st.session_state.chatbot is None:
-                st.session_state.chatbot = WholesaleBankingChatbot(formatted_code)
-            else:
-                st.session_state.chatbot.update_client_code(formatted_code)
-
-            st.session_state.messages = []
-            st.rerun()
-        else:
+        if not is_valid:
             st.error("⚠️ Enter a valid RM_CODE (6-7 chars) or APR_CLIENT_CODE (8-14 chars)")
+        else:
+            formatted_code = format_client_code(client_code_input)
+            if code_type == "RM_CODE":
+                try:
+                    resolution = db_reader.resolve_lookup_code(formatted_code, "RM_CODE")
+                except Exception as e:
+                    st.error(f"Database error while looking up RM: {str(e)}. Please check DB_* settings in the .env file.")
+                    resolution = None
+                if resolution is not None:
+                    if resolution["rm"] is None:
+                        st.error(f"⚠️ No RM found for code {formatted_code}.")
+                    elif not resolution["clients"]:
+                        st.warning(f"RM {resolution['rm']['rm_name']} ({formatted_code}) has no actively mapped clients.")
+                    else:
+                        st.session_state.rm_code = formatted_code
+                        st.session_state.rm_name = resolution["rm"]["rm_name"]
+                        st.session_state.rm_clients = resolution["clients"]
+                        # Reset any previously loaded client so the picker takes focus
+                        st.session_state.client_code = None
+                        st.session_state.code_type = None
+                        st.session_state.client_summaries = None
+                        st.session_state.summaries_generated = False
+                        st.session_state.messages = []
+                        st.rerun()
+            else:
+                # Direct client lookup drops any RM picker context
+                st.session_state.rm_code = None
+                st.session_state.rm_name = None
+                st.session_state.rm_clients = None
+                load_client_dashboard(formatted_code)
 
     if clear_clicked:
         st.session_state.client_code = None
@@ -448,7 +517,31 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.client_summaries = None
         st.session_state.summaries_generated = False
+        st.session_state.rm_code = None
+        st.session_state.rm_name = None
+        st.session_state.rm_clients = None
         st.rerun()
+
+    if st.session_state.rm_clients:
+        st.markdown('<div class="sidebar-section-label">Client Picker</div>', unsafe_allow_html=True)
+        st.markdown(f"""
+            <div class="sidebar-status-card">
+                <div class="code">👔 {st.session_state.rm_name}</div>
+                <div class="type">{st.session_state.rm_code} · {len(st.session_state.rm_clients)} active clients</div>
+            </div>
+        """, unsafe_allow_html=True)
+        picker_options = {
+            f"{c['client_name']} ({c['apr_client_code']})": c["apr_client_code"]
+            for c in st.session_state.rm_clients
+        }
+        picker_choice = st.selectbox(
+            "Select a client",
+            list(picker_options.keys()),
+            key="rm_client_choice",
+            label_visibility="collapsed",
+        )
+        if st.button("Load client dashboard", type="primary", use_container_width=True):
+            load_client_dashboard(picker_options[picker_choice])
 
     if st.session_state.client_code:
         st.markdown(f"""
@@ -476,10 +569,15 @@ st.markdown("""
 
 if st.session_state.client_code and st.session_state.summaries_generated and st.session_state.client_summaries:
     # ---- Status chips ----
+    rm_chip = (
+        f'<span class="chip chip-type">👔 {st.session_state.rm_name} · {st.session_state.rm_code}</span>'
+        if st.session_state.rm_code else ''
+    )
     st.markdown(f"""
         <div class="chip-row">
             <span class="chip chip-code">🔑 {st.session_state.client_code}</span>
             <span class="chip chip-type">{st.session_state.code_type or 'CLIENT'}</span>
+            {rm_chip}
             <span class="chip chip-status"><span class="chip-dot"></span> Analysis complete</span>
         </div>
     """, unsafe_allow_html=True)
@@ -544,6 +642,47 @@ if st.session_state.client_code and st.session_state.summaries_generated and st.
             <div class="tab-section-title"><span>💬</span> RM-Client Discussions</div>
         """, unsafe_allow_html=True)
         st.markdown(f'<div class="summary-text">{st.session_state.client_summaries["rm_discussion_summary"]}</div>', unsafe_allow_html=True)
+
+elif st.session_state.rm_clients:
+    # ---- RM search: client-picker overview ----
+    st.markdown(f"""
+        <div class="chip-row">
+            <span class="chip chip-code">👔 {st.session_state.rm_name}</span>
+            <span class="chip chip-type">{st.session_state.rm_code}</span>
+            <span class="chip chip-status"><span class="chip-dot"></span> {len(st.session_state.rm_clients)} active clients</span>
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+        <div class="section-title">
+            <span class="section-icon">🗂️</span>
+            <strong>Clients Managed by this RM</strong>
+        </div>
+    """, unsafe_allow_html=True)
+
+    picker_rows = "".join(
+        "<tr>"
+        f"<td class='code-cell'>{escape(c['apr_client_code'])}</td>"
+        f"<td>{escape(c['client_name'])}</td>"
+        f"<td>{escape(c.get('client_segment') or '—')}</td>"
+        f"<td>{escape(c.get('client_status') or '—')}</td>"
+        f"<td>{escape(c.get('mapping_role') or '—')}</td>"
+        f"<td>{'Yes' if c.get('is_primary') == 'Y' else 'No'}</td>"
+        f"<td>{escape(str(c.get('mapping_start_date') or '—'))}</td>"
+        "</tr>"
+        for c in st.session_state.rm_clients
+    )
+    st.markdown(
+        '<table class="picker-table">'
+        "<thead><tr><th>Client Code</th><th>Client Name</th><th>Segment</th>"
+        "<th>Status</th><th>Mapping Role</th><th>Primary</th><th>Mapped Since</th></tr></thead>"
+        f"<tbody>{picker_rows}</tbody></table>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("""
+        <div class="cta-hint">👈 Pick a client in the sidebar and load their dashboard.</div>
+    """, unsafe_allow_html=True)
 
 else:
     if not st.session_state.client_code:
