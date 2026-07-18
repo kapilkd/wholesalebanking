@@ -187,12 +187,18 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
   code only); `fetch_all_tab_data()` fetches every tab summary view plus all
   six chart views in parallel and returns one JSON-safe,
   `lower_snake_case` payload for the rules/narration steps.
+- **`src/multi_agent_generator.py` narrates DB payloads.** The 5 tab agents
+  fan out in parallel from LangGraph `START` (partial state updates), each
+  receiving only its tab's `db_reader` rows as JSON at temperature 0.1 under
+  a strict never-invent narrator prompt. `generate_all_summaries()` keeps
+  its old return keys (UI unchanged) and adds `tab_data` so charts/rules can
+  reuse the fetch. Unknown codes raise `ValueError` before any LLM call;
+  `app.py` shows not-found, and RM codes show an interim notice until the
+  client-picker UX lands.
 
 ## Not yet implemented
 
 - Rules layer (thresholds/filters between SQL fetch and LLM narration).
-- Rewiring `src/multi_agent_generator.py` to narrate `db_reader` payloads
-  (low temperature) instead of inventing data.
 - Wiring `src/chart_generator.py` to `db_reader`'s chart data instead of
   hardcoded arrays.
 - RM-search client-picker UX in `app.py` (data side exists in `db_reader`).

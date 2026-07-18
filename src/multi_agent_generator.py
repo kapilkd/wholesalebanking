@@ -1,16 +1,50 @@
 """
-Multi-Agent LangGraph system for generating client summaries
+Multi-Agent LangGraph system for narrating client summaries from database data.
+
+Implements the tab-rendering pipeline from CLAUDE.md:
+
+    SQL fetch (src/db_reader.py)  ->  LLM narration (this module)
+
+The LLM here is a narrator, not a data source: every agent receives only
+already-fetched rows from the tab's database view as JSON context, runs at
+low temperature, and is instructed to never state a fact that isn't in the
+payload. Unknown client codes raise in db_reader before any LLM call.
+
+The five tab agents are independent, so the graph fans them out in parallel
+from START (each node returns a partial state update — required by LangGraph
+for concurrent branches, and the parallelization lever that replaces the old
+sequential 5-call chain).
 """
-from typing import TypedDict, Annotated
-from langgraph.graph import StateGraph, END
+import json
+from typing import TypedDict
+
+from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+
 from config.langchain_config import get_llm
+from src import db_reader
+
+# Narration must be deterministic prose over fixed numbers, not creative
+# writing — CLAUDE.md prescribes 0.1-0.2 for this path.
+NARRATION_TEMPERATURE = 0.1
+
+NARRATOR_SYSTEM_PROMPT = """You are a banking data narrator for ABC Bank Wholesale Banking Department.
+You turn structured rows retrieved from the bank's database into short, professional prose summaries for relationship managers.
+
+STRICT GROUNDING RULES:
+- Use ONLY the facts and figures present in the provided JSON. Every number, name, date, and product you mention must appear in the data.
+- NEVER invent, estimate, extrapolate, or fill in missing values.
+- If a field is null or missing, simply omit it from the narrative.
+- If the data contains no records (empty list, all-zero totals), state that plainly in one sentence instead of describing activity that isn't there.
+- Monetary values are stored in INR Crores: format them as ₹**XX.XX CR**.
+- Format every number, percentage, and date as bold markdown (**...**).
+- Write 1-3 short paragraphs of flowing prose; use a list only when the data itself is a list of events."""
 
 
 class SummaryState(TypedDict):
-    """State for the multi-agent summary generation"""
+    """State for the multi-agent summary narration"""
     client_code: str
+    tab_data: dict          # db_reader.fetch_all_tab_data() payload
     rm_summary: str
     asset_summary: str
     liability_summary: str
@@ -19,196 +53,168 @@ class SummaryState(TypedDict):
 
 
 class MultiAgentSummaryGenerator:
-    """Multi-agent system using LangGraph to generate client summaries"""
-    
+    """LangGraph fan-out of five narration agents, one per dashboard tab."""
+
     def __init__(self):
-        self.llm = get_llm(temperature=0.7)
-    
-    def generate_rm_summary(self, state: SummaryState) -> SummaryState:
-        """Generate RM details and interactions summary"""
-        client_code = state["client_code"]
-        
-        prompt = f"""Generate a comprehensive dummy summary about Relationship Manager (RM) details and interactions 
-        for client code {client_code} at ABC Bank Wholesale Banking Department. Include:
-        - RM name, designation, and contact details (ABC Bank employee)
-        - Complete RM interaction history with ABC Bank Wholesale Banking context
-        - CRM contents showing when the client was called and approached by ABC Bank
-        - Meeting dates, call logs, and interaction notes
-        - Relationship timeline with ABC Bank
-        
-        IMPORTANT REQUIREMENTS:
-        - All monetary values must be in Indian Rupees (INR) and displayed in Crores (CR) format
-        - Use format: ₹**XX.XX CR** (even values less than 1 crore should be in decimal, e.g., ₹**0.85 CR**)
-        - All numbers, dates, and amounts must be formatted as **bold** using markdown (**number**)
-        - Context must be ABC Bank Wholesale Banking Department
-        - Make it detailed, realistic, and professional
-        - Format as paragraphs with specific dates, times, and interaction details"""
-        
+        self.llm = get_llm(temperature=NARRATION_TEMPERATURE)
+
+        workflow = StateGraph(SummaryState)
+        workflow.add_node("rm_agent", self.narrate_rm_summary)
+        workflow.add_node("asset_agent", self.narrate_asset_summary)
+        workflow.add_node("liability_agent", self.narrate_liability_summary)
+        workflow.add_node("product_agent", self.narrate_product_holding_summary)
+        workflow.add_node("discussion_agent", self.narrate_rm_discussion_summary)
+
+        for node in ("rm_agent", "asset_agent", "liability_agent",
+                     "product_agent", "discussion_agent"):
+            workflow.add_edge(START, node)
+            workflow.add_edge(node, END)
+
+        self._graph = workflow.compile()
+
+    # ------------------------------------------------------------------ #
+    # Shared narration call
+    # ------------------------------------------------------------------ #
+
+    def _narrate(self, tab: str, coverage: str, payload: dict) -> str:
+        """One grounded narration call: tab context + JSON rows -> prose."""
         messages = [
-            SystemMessage(content="You are a CRM data analyst at ABC Bank Wholesale Banking Department. Generate realistic dummy data for banking client interactions. Always use Indian Rupees (INR) in Crores (CR) format. Format all numbers as bold using **number** markdown syntax. Example: ₹**2.5 CR**"),
-            HumanMessage(content=prompt)
+            SystemMessage(content=NARRATOR_SYSTEM_PROMPT),
+            HumanMessage(content=(
+                f"Tab: {tab}\n"
+                f"Write the summary covering {coverage}.\n\n"
+                "Database rows retrieved for this client (JSON):\n"
+                f"{json.dumps(payload, indent=2, default=str)}"
+            )),
         ]
-        
-        response = self.llm.invoke(messages)
-        state["rm_summary"] = response.content
-        return state
-    
-    def generate_asset_summary(self, state: SummaryState) -> SummaryState:
-        """Generate asset base summary"""
-        client_code = state["client_code"]
-        
-        prompt = f"""Generate a comprehensive dummy summary about asset base         for client code {client_code} at ABC Bank Wholesale Banking Department. Include:
-        - Total asset value and breakdown (in Indian Rupees)
-        - Asset categories (loans, investments, securities, etc.) with ABC Bank Wholesale Banking products
-        - Asset quality metrics
-        - Historical asset trends
-        - Portfolio composition with ABC Bank context
-        
-        IMPORTANT REQUIREMENTS:
-        - All monetary values must be in Indian Rupees (INR) and displayed in Crores (CR) format
-        - Use format: ₹**XX.XX CR** (even values less than 1 crore should be in decimal, e.g., ₹**0.85 CR**)
-        - All numbers, percentages, amounts, and dates must be formatted as **bold** using markdown (**number**)
-        - Context must be ABC Bank Wholesale Banking Department
-        - Make it detailed with specific numbers, percentages, and professional financial terminology"""
-        
-        messages = [
-            SystemMessage(content="You are a financial analyst at ABC Bank Wholesale Banking Department specializing in asset management. Generate realistic dummy asset data. Always use Indian Rupees (INR) in Crores (CR) format. Format all numbers, percentages, and amounts as bold using **number** markdown syntax. Example: ₹**125.75 CR**"),
-            HumanMessage(content=prompt)
-        ]
-        
-        response = self.llm.invoke(messages)
-        state["asset_summary"] = response.content
-        return state
-    
-    def generate_liability_summary(self, state: SummaryState) -> SummaryState:
-        """Generate liability base summary"""
-        client_code = state["client_code"]
-        
-        prompt = f"""Generate a comprehensive dummy summary about liability base         for client code {client_code} at ABC Bank Wholesale Banking Department. Include:
-        - Total liability value and breakdown (in Indian Rupees)
-        - Liability categories (deposits, borrowings, bonds, etc.) with ABC Bank Wholesale Banking products
-        - Liability structure and maturity profiles
-        - Interest rate exposure
-        - Risk metrics
-        
-        IMPORTANT REQUIREMENTS:
-        - All monetary values must be in Indian Rupees (INR) and displayed in Crores (CR) format
-        - Use format: ₹**XX.XX CR** (even values less than 1 crore should be in decimal, e.g., ₹**0.85 CR**)
-        - All numbers, percentages, amounts, and dates must be formatted as **bold** using markdown (**number**)
-        - Context must be ABC Bank Wholesale Banking Department
-        - Make it detailed with specific numbers, percentages, and professional financial terminology"""
-        
-        messages = [
-            SystemMessage(content="You are a financial analyst at ABC Bank Wholesale Banking Department specializing in liability management. Generate realistic dummy liability data. Always use Indian Rupees (INR) in Crores (CR) format. Format all numbers, percentages, and amounts as bold using **number** markdown syntax. Example: ₹**95.25 CR**"),
-            HumanMessage(content=prompt)
-        ]
-        
-        response = self.llm.invoke(messages)
-        state["liability_summary"] = response.content
-        return state
-    
-    def generate_product_holding_summary(self, state: SummaryState) -> SummaryState:
-        """Generate overall banking and product holding summary"""
-        client_code = state["client_code"]
-        
-        prompt = f"""Generate a comprehensive dummy summary about overall banking relationship and product holdings 
-        for client code {client_code} at ABC Bank Wholesale Banking Department. Include:
-        - Complete product portfolio (ABC Bank current accounts, credit facilities, trade finance, treasury products, etc.)
-        - Product-wise holdings and values (in Indian Rupees - Crores)
-        - Product utilization rates
-        - Cross-selling opportunities with ABC Bank Wholesale Banking products
-        - Banking relationship depth and breadth with ABC Bank
-        
-        IMPORTANT REQUIREMENTS:
-        - All monetary values must be in Indian Rupees (INR) and displayed in Crores (CR) format
-        - Use format: ₹**XX.XX CR** (even values less than 1 crore should be in decimal, e.g., ₹**0.85 CR**)
-        - All numbers, percentages, amounts, and dates must be formatted as **bold** using markdown (**number**)
-        - Context must be ABC Bank Wholesale Banking Department
-        - Use ABC Bank product names where relevant
-        - Make it detailed with specific product names, values, and utilization metrics"""
-        
-        messages = [
-            SystemMessage(content="You are a product manager at ABC Bank Wholesale Banking Department analyzing client product holdings. Generate realistic dummy product data. Always use Indian Rupees (INR) in Crores (CR) format. Format all numbers, percentages, and amounts as bold using **number** markdown syntax. Example: ₹**45.50 CR**"),
-            HumanMessage(content=prompt)
-        ]
-        
-        response = self.llm.invoke(messages)
-        state["product_holding_summary"] = response.content
-        return state
-    
-    def generate_rm_discussion_summary(self, state: SummaryState) -> SummaryState:
-        """Generate RM-client discussion summary"""
-        client_code = state["client_code"]
-        
-        prompt = f"""Generate a comprehensive dummy summary of discussions between ABC Bank Relationship Manager and client {client_code} from ABC Bank Wholesale Banking Department. Include:
-        - Recent conversation topics related to ABC Bank Wholesale Banking services
-        - Client needs and requirements discussed
-        - Proposed ABC Bank solutions and recommendations
-        - Follow-up actions and commitments
-        - Meeting minutes style discussion points
-        - Any monetary discussions in Indian Rupees
-        
-        IMPORTANT REQUIREMENTS:
-        - All monetary values must be in Indian Rupees (INR) with ₹ symbol
-        - All numbers, percentages, amounts, and dates must be formatted as **bold** using markdown (**number**)
-        - Context must be ABC Bank Wholesale Banking Department
-        - Make it conversational, detailed, and realistic with specific discussion points and outcomes"""
-        
-        messages = [
-            SystemMessage(content="You are a relationship manager at ABC Bank Wholesale Banking Department documenting client discussions. Generate realistic dummy discussion notes. Always use Indian Rupees (INR) in Crores (CR) format. Format all numbers, percentages, and amounts as bold using **number** markdown syntax. Example: ₹**12.30 CR**"),
-            HumanMessage(content=prompt)
-        ]
-        
-        response = self.llm.invoke(messages)
-        state["rm_discussion_summary"] = response.content
-        return state
-    
+        return self.llm.invoke(messages).content
+
+    # ------------------------------------------------------------------ #
+    # Tab agents — each returns a partial state update (parallel-safe)
+    # ------------------------------------------------------------------ #
+
+    def narrate_rm_summary(self, state: SummaryState) -> dict:
+        """RM Details tab: VW_RM_DETAILS_SUMMARY + client master row."""
+        payload = {
+            "client": state["tab_data"]["client"],
+            "rm_details": state["tab_data"]["rm_details_summary"],
+        }
+        return {"rm_summary": self._narrate(
+            tab="Relationship Manager Details & CRM Interactions",
+            coverage=(
+                "who manages the client (RM name, designation, contact, branch), "
+                "how actively the relationship is covered (interaction, call and "
+                "meeting counts, last-interaction dates), and any escalations or "
+                "feedback figures present"
+            ),
+            payload=payload,
+        )}
+
+    def narrate_asset_summary(self, state: SummaryState) -> dict:
+        """Asset Base tab: VW_ASSET_BASE_SUMMARY + the three asset chart views."""
+        payload = {
+            "asset_summary": state["tab_data"]["asset_base_summary"],
+            "asset_charts": state["tab_data"]["asset_charts"],
+        }
+        return {"asset_summary": self._narrate(
+            tab="Asset Base",
+            coverage=(
+                "total asset value and account count, the category breakdown, "
+                "asset quality (Standard/Sub-Standard/Doubtful/Loss split), "
+                "sanctioned vs utilized limits, collateral cover, covenant "
+                "breaches, and the growth trend across the monthly history"
+            ),
+            payload=payload,
+        )}
+
+    def narrate_liability_summary(self, state: SummaryState) -> dict:
+        """Liability Base tab: VW_LIABILITY_BASE_SUMMARY + liability chart views."""
+        payload = {
+            "liability_summary": state["tab_data"]["liability_base_summary"],
+            "liability_charts": state["tab_data"]["liability_charts"],
+        }
+        return {"liability_summary": self._narrate(
+            tab="Liability Base",
+            coverage=(
+                "total liability value and account count, the category "
+                "breakdown, average interest rate and concentration risk, the "
+                "maturity profile buckets, and the interest-rate exposure split"
+            ),
+            payload=payload,
+        )}
+
+    def narrate_product_holding_summary(self, state: SummaryState) -> dict:
+        """Product Holdings tab: VW_PRODUCT_HOLDINGS_SUMMARY."""
+        payload = {
+            "client": state["tab_data"]["client"],
+            "product_holdings": state["tab_data"]["product_holdings_summary"],
+        }
+        return {"product_holding_summary": self._narrate(
+            tab="Overall Banking & Product Holdings",
+            coverage=(
+                "how many products the client holds and their total value, "
+                "utilization figures, fee income, relationship depth, and any "
+                "cross-sell opportunity counts present"
+            ),
+            payload=payload,
+        )}
+
+    def narrate_rm_discussion_summary(self, state: SummaryState) -> dict:
+        """RM Discussion tab: VW_RM_DISCUSSION_SUMMARY sessions, newest first."""
+        payload = {
+            "discussion_sessions": state["tab_data"]["rm_discussion_sessions"],
+        }
+        return {"rm_discussion_summary": self._narrate(
+            tab="RM-Client Discussions",
+            coverage=(
+                "the recent discussion sessions in order (date, mode, topics/"
+                "needs/solutions counts), what was concluded (outcome "
+                "summaries), accepted solutions, open follow-up actions, and "
+                "upcoming next steps / review dates"
+            ),
+            payload=payload,
+        )}
+
+    # ------------------------------------------------------------------ #
+    # Entry point
+    # ------------------------------------------------------------------ #
+
     def generate_all_summaries(self, client_code: str) -> dict:
         """
-        Generate all 5 summaries using LangGraph multi-agent system
-        
+        Fetch the client's data (parallel SQL, src/db_reader.py) and narrate
+        all 5 tab summaries (parallel LLM calls via the LangGraph fan-out).
+
         Args:
-            client_code: APR_CLIENT_CODE to generate summaries for
-        
+            client_code: APR_CLIENT_CODE to summarize
+
         Returns:
-            dict: Dictionary containing all 5 summaries
+            dict: the 5 summaries (same keys the UI already renders) plus
+            "tab_data" — the raw fetched payload, so downstream consumers
+            (charts, rules) don't have to refetch.
+
+        Raises:
+            ValueError: if the code doesn't exist in CLIENT_MASTER — the
+            caller shows not-found; nothing ever reaches the LLM.
         """
-        # Initialize state
+        tab_data = db_reader.fetch_all_tab_data(client_code)
+
         initial_state: SummaryState = {
             "client_code": client_code,
+            "tab_data": tab_data,
             "rm_summary": "",
             "asset_summary": "",
             "liability_summary": "",
             "product_holding_summary": "",
-            "rm_discussion_summary": ""
+            "rm_discussion_summary": "",
         }
-        
-        # Create LangGraph workflow
-        workflow = StateGraph(SummaryState)
-        
-        # Add nodes for each agent
-        workflow.add_node("rm_agent", self.generate_rm_summary)
-        workflow.add_node("asset_agent", self.generate_asset_summary)
-        workflow.add_node("liability_agent", self.generate_liability_summary)
-        workflow.add_node("product_agent", self.generate_product_holding_summary)
-        workflow.add_node("discussion_agent", self.generate_rm_discussion_summary)
-        
-        # Define the workflow sequence (parallel execution of independent agents)
-        workflow.set_entry_point("rm_agent")
-        workflow.add_edge("rm_agent", "asset_agent")
-        workflow.add_edge("asset_agent", "liability_agent")
-        workflow.add_edge("liability_agent", "product_agent")
-        workflow.add_edge("product_agent", "discussion_agent")
-        workflow.add_edge("discussion_agent", END)
-        
-        # Compile and run the graph
-        app = workflow.compile()
-        final_state = app.invoke(initial_state)
-        
+
+        final_state = self._graph.invoke(initial_state)
+
         return {
             "rm_summary": final_state["rm_summary"],
             "asset_summary": final_state["asset_summary"],
             "liability_summary": final_state["liability_summary"],
             "product_holding_summary": final_state["product_holding_summary"],
-            "rm_discussion_summary": final_state["rm_discussion_summary"]
+            "rm_discussion_summary": final_state["rm_discussion_summary"],
+            "tab_data": tab_data,
         }
