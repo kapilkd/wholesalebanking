@@ -405,7 +405,13 @@ with st.sidebar:
 
     if submit_clicked:
         is_valid, code_type = validate_client_code(client_code_input)
-        if is_valid:
+        if is_valid and code_type == "RM_CODE":
+            # Tab data is keyed by APR_CLIENT_CODE only; RM search resolves to
+            # the RM's mapped clients (db_reader.resolve_lookup_code) and will
+            # surface here as a client picker in an upcoming change.
+            st.warning("⚠️ RM-code search is being upgraded to a client picker. "
+                       "Until then, please enter an APR_CLIENT_CODE directly.")
+        elif is_valid:
             formatted_code = format_client_code(client_code_input)
 
             if st.session_state.client_code != formatted_code or not st.session_state.summaries_generated:
@@ -417,8 +423,12 @@ with st.sidebar:
                         generator = MultiAgentSummaryGenerator()
                         st.session_state.client_summaries = generator.generate_all_summaries(formatted_code)
                         st.session_state.summaries_generated = True
+                    except ValueError as e:
+                        # Raised by db_reader before any LLM call is made.
+                        st.error(f"⚠️ {str(e)} — no matching client in the database.")
+                        st.session_state.summaries_generated = False
                     except Exception as e:
-                        st.error(f"Error generating summaries: {str(e)}. Please check your OpenAI API key in the .env file.")
+                        st.error(f"Error generating summaries: {str(e)}. Please check your OpenAI API key and DB_* settings in the .env file.")
                         st.session_state.summaries_generated = False
 
             if st.session_state.chatbot is None:
