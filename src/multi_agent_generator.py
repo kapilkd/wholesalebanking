@@ -21,8 +21,11 @@ from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage, SystemMessage
 
+import datetime
+
 from config.langchain_config import get_llm
 from src import db_reader
+from src import summary_cache
 from src.rules_layer import apply_rules
 
 # Narration must be deterministic prose over fixed numbers, not creative
@@ -217,13 +220,19 @@ class MultiAgentSummaryGenerator:
     # Entry point
     # ------------------------------------------------------------------ #
 
-    def generate_all_summaries(self, client_code: str) -> dict:
+    def generate_all_summaries(self, client_code: str,
+                               use_cache: bool = True) -> dict:
         """
         Fetch the client's data (parallel SQL, src/db_reader.py) and narrate
         all 6 tab summaries (parallel LLM calls via the LangGraph fan-out).
 
+        Results are cached in-process per client (src/summary_cache.py,
+        TTL-bounded) so repeat lookups skip the fetch+narration cost.
+
         Args:
             client_code: APR_CLIENT_CODE to summarize
+            use_cache: pass False to force a fresh fetch+narration (the
+                UI's Refresh action also invalidates the stored entry)
 
         Returns:
             dict: the 6 summaries (same keys the UI already renders) plus
@@ -234,6 +243,11 @@ class MultiAgentSummaryGenerator:
             ValueError: if the code doesn't exist in CLIENT_MASTER — the
             caller shows not-found; nothing ever reaches the LLM.
         """
+        if use_cache:
+            cached = summary_cache.get(client_code)
+            if cached is not None:
+                return cached
+
         tab_data = db_reader.fetch_all_tab_data(client_code)
         rules = apply_rules(tab_data)
 
@@ -251,7 +265,7 @@ class MultiAgentSummaryGenerator:
 
         final_state = self._graph.invoke(initial_state)
 
-        return {
+        result = {
             "cms_summary": final_state["cms_summary"],
             "rm_summary": final_state["rm_summary"],
             "asset_summary": final_state["asset_summary"],
@@ -260,4 +274,7 @@ class MultiAgentSummaryGenerator:
             "rm_discussion_summary": final_state["rm_discussion_summary"],
             "tab_data": tab_data,
             "rules": rules,
+            "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
         }
+        summary_cache.put(client_code, result)
+        return result
