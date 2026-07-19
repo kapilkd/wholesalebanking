@@ -104,6 +104,31 @@ def load_client_dashboard(client_code: str):
     st.session_state.messages = []
     st.rerun()
 
+
+HIGHLIGHT_ICONS = {"warning": "⚠️", "info": "ℹ️"}
+
+
+def tab_highlights(tab_key: str) -> list:
+    """Rules-layer highlights for one tab; [] for pre-rules cached sessions."""
+    rules = (st.session_state.client_summaries or {}).get("rules") or {}
+    return (rules.get("highlights") or {}).get(tab_key) or []
+
+
+def render_highlight_badges(tab_key: str):
+    """Render one tab's deterministic rule findings as severity badges."""
+    highlights = tab_highlights(tab_key)
+    if not highlights:
+        return
+    rows = "".join(
+        f'<div class="rule-badge rule-badge-{escape(h.get("severity") or "info")}">'
+        f'<span>{HIGHLIGHT_ICONS.get(h.get("severity"), "ℹ️")}</span>'
+        f'<span class="rule-id">{escape((h.get("rule") or "").replace("_", " "))}</span>'
+        f'<span>{escape(h.get("message") or "")}</span>'
+        "</div>"
+        for h in highlights
+    )
+    st.markdown(f'<div class="badge-row">{rows}</div>', unsafe_allow_html=True)
+
 # ----------------------------------------------------------------------------
 # Design system — ABC Bank brand (navy + red) on a modern fintech shell
 # ----------------------------------------------------------------------------
@@ -291,6 +316,24 @@ st.markdown("""
         margin-top: 1.4rem;
         background: rgba(0,48,135,0.03);
     }
+
+    /* ---------- Rules-layer highlight badges ---------- */
+    .badge-row { display: flex; flex-direction: column; gap: 0.45rem; margin-bottom: 0.9rem; }
+    .rule-badge {
+        display: flex; align-items: flex-start; gap: 0.55rem;
+        padding: 0.5rem 0.85rem;
+        border-radius: 10px;
+        border: 1px solid;
+        font-size: 0.85rem;
+        line-height: 1.45;
+    }
+    .rule-badge .rule-id {
+        font-weight: 700; font-size: 0.68rem; letter-spacing: 0.4px;
+        opacity: 0.75; white-space: nowrap; margin-top: 0.18rem;
+    }
+    .rule-badge-warning { background: #FDF0E7; border-color: #F2C49B; color: #8A4B08; }
+    .rule-badge-info { background: rgba(0,168,232,0.08); border-color: rgba(0,168,232,0.3); color: #075E7F; }
+    .chip-attention { background: #FDF0E7; color: #8A4B08; border: 1px solid #F2C49B; }
 
     /* ---------- RM client-picker table ---------- */
     .picker-table {
@@ -573,11 +616,20 @@ if st.session_state.client_code and st.session_state.summaries_generated and st.
         f'<span class="chip chip-type">👔 {st.session_state.rm_name} · {st.session_state.rm_code}</span>'
         if st.session_state.rm_code else ''
     )
+    all_highlights = ((st.session_state.client_summaries.get("rules") or {})
+                      .get("highlights") or {})
+    warning_count = sum(1 for hs in all_highlights.values() for h in hs
+                        if h.get("severity") == "warning")
+    attention_chip = (
+        f'<span class="chip chip-attention">⚠️ {warning_count} attention item(s)</span>'
+        if warning_count else ''
+    )
     st.markdown(f"""
         <div class="chip-row">
             <span class="chip chip-code">🔑 {st.session_state.client_code}</span>
             <span class="chip chip-type">{st.session_state.code_type or 'CLIENT'}</span>
             {rm_chip}
+            {attention_chip}
             <span class="chip chip-status"><span class="chip-dot"></span> Analysis complete</span>
         </div>
     """, unsafe_allow_html=True)
@@ -604,6 +656,7 @@ if st.session_state.client_code and st.session_state.summaries_generated and st.
                 <span>📋</span> Customer Management &amp; Profile
             </div>
         """, unsafe_allow_html=True)
+        render_highlight_badges("cms")
         # .get(): sessions generated before the CMS agent existed have no
         # cms_summary key — degrade to a hint instead of a KeyError.
         cms_text = st.session_state.client_summaries.get("cms_summary") or \
@@ -616,12 +669,14 @@ if st.session_state.client_code and st.session_state.summaries_generated and st.
                 <span>👤</span> Relationship Manager Details &amp; CRM Interactions
             </div>
         """, unsafe_allow_html=True)
+        render_highlight_badges("rm_details")
         st.markdown(f'<div class="summary-text">{st.session_state.client_summaries["rm_summary"]}</div>', unsafe_allow_html=True)
 
     with tab2:
         st.markdown("""
             <div class="tab-section-title"><span>💼</span> Asset Base Interactions</div>
         """, unsafe_allow_html=True)
+        render_highlight_badges("asset")
 
         col_text, col_charts = st.columns([1, 1])
         with col_text:
@@ -635,6 +690,7 @@ if st.session_state.client_code and st.session_state.summaries_generated and st.
         st.markdown("""
             <div class="tab-section-title"><span>📈</span> Liability Base Interactions</div>
         """, unsafe_allow_html=True)
+        render_highlight_badges("liability")
 
         col_text, col_charts = st.columns([1, 1])
         with col_text:
@@ -648,12 +704,14 @@ if st.session_state.client_code and st.session_state.summaries_generated and st.
         st.markdown("""
             <div class="tab-section-title"><span>🏢</span> Overall Banking &amp; Product Holdings</div>
         """, unsafe_allow_html=True)
+        render_highlight_badges("product")
         st.markdown(f'<div class="summary-text">{st.session_state.client_summaries["product_holding_summary"]}</div>', unsafe_allow_html=True)
 
     with tab5:
         st.markdown("""
             <div class="tab-section-title"><span>💬</span> RM-Client Discussions</div>
         """, unsafe_allow_html=True)
+        render_highlight_badges("discussion")
         st.markdown(f'<div class="summary-text">{st.session_state.client_summaries["rm_discussion_summary"]}</div>', unsafe_allow_html=True)
 
 elif st.session_state.rm_clients:

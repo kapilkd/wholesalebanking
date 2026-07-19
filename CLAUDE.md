@@ -233,4 +233,6 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
   verbatim-in-substance; narration inputs are windowed (12-month growth
   trend, 180-day/10-session discussion cap with a stale fallback) while
   chart/UI payloads stay untouched. `generate_all_summaries()` returns the
-  rules output under `"rules"` for future UI badges.
+  rules output under `"rules"`, and `app.py` renders it: per-tab severity
+  badges (`render_highlight_badges()`) above each summary plus a
+  warning-count "attention items" chip in the status row.
