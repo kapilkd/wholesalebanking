@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from typing import Any, Dict, List, Optional
 
-from config.db_config import get_db_connection
+from config.db_config import get_db_connection, get_readonly_db_connection
 
 # Upper bound on concurrent view fetches. Must not exceed pool_size in
 # config/db_config.py (5) — mysql.connector's pool raises PoolError
@@ -72,6 +72,42 @@ def _fetch_all(query: str, params: tuple = ()) -> List[Dict[str, Any]]:
 def _fetch_one(query: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
     rows = _fetch_all(query, params)
     return rows[0] if rows else None
+
+
+# ---------------------------------------------------------------------------
+# Chat path: guarded execution of validated LLM-generated SQL
+# ---------------------------------------------------------------------------
+
+CHAT_QUERY_TIMEOUT_SECONDS = 10
+
+
+def execute_readonly_sql(query: str,
+                         timeout_seconds: int = CHAT_QUERY_TIMEOUT_SECONDS) -> List[Dict[str, Any]]:
+    """
+    Execute one ALREADY-VALIDATED chat query (src/sql_guardrails.py must
+    have passed it first — this function does not re-validate).
+
+    Defense in depth at the session level regardless of validation:
+    - the session is forced READ ONLY, so any write that slipped through
+      fails at the engine;
+    - a statement timeout is set (MariaDB max_statement_time / MySQL
+      MAX_EXECUTION_TIME — whichever the server accepts);
+    - runs on the read-only pool (dedicated SELECT-only credentials when
+      DB_RO_USER is configured).
+    """
+    with closing(get_readonly_db_connection()) as conn:
+        with closing(conn.cursor(dictionary=True)) as cur:
+            for stmt in (
+                f"SET SESSION max_statement_time={timeout_seconds}",           # MariaDB (seconds)
+                f"SET SESSION MAX_EXECUTION_TIME={timeout_seconds * 1000}",    # MySQL (ms)
+            ):
+                try:
+                    cur.execute(stmt)
+                except Exception:
+                    pass  # whichever variant the engine doesn't know
+            cur.execute("SET SESSION TRANSACTION READ ONLY")
+            cur.execute(query)
+            return [_normalize_row(row) for row in cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------

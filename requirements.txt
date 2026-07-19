@@ -9,4 +9,5 @@ numpy>=1.24.0
 python-dotenv>=1.0.0
 openai>=1.10.0
 mysql-connector-python>=8.0.0
+sqlglot>=25.0.0  # chat-path SQL guardrails (src/sql_guardrails.py)
 faker>=20.0.0  # used by scripts/seed_data.py only, not by the app itself

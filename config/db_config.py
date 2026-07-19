@@ -10,23 +10,12 @@ from mysql.connector import pooling
 load_dotenv()
 
 _pool = None
+_readonly_pool = None
 
 
-def _get_pool():
-    """
-    Lazily create and return a connection pool, built from DB_* env vars.
-
-    Returns:
-        mysql.connector.pooling.MySQLConnectionPool
-    """
-    global _pool
-    if _pool is not None:
-        return _pool
-
+def _build_pool(pool_name, user, password, pool_size=5):
     host = os.getenv("DB_HOST")
     port = os.getenv("DB_PORT")
-    user = os.getenv("DB_USER")
-    password = os.getenv("DB_PASSWORD", "")
     database = os.getenv("DB_NAME")
 
     if not host or not port or not user or not database:
@@ -35,9 +24,9 @@ def _get_pool():
             "DB_NAME must be set in your .env file."
         )
 
-    _pool = pooling.MySQLConnectionPool(
-        pool_name="wholesale_banking_pool",
-        pool_size=5,
+    return pooling.MySQLConnectionPool(
+        pool_name=pool_name,
+        pool_size=pool_size,
         host=host,
         port=int(port),
         user=user,
@@ -50,7 +39,40 @@ def _get_pool():
         # small, so the C extension's speed advantage doesn't matter.
         use_pure=True,
     )
+
+
+def _get_pool():
+    """Lazily create the primary pool from DB_* env vars."""
+    global _pool
+    if _pool is None:
+        _pool = _build_pool(
+            "wholesale_banking_pool",
+            os.getenv("DB_USER"),
+            os.getenv("DB_PASSWORD", ""),
+        )
     return _pool
+
+
+def _get_readonly_pool():
+    """
+    Pool for LLM-generated chat queries. Uses the dedicated read-only
+    credentials DB_RO_USER / DB_RO_PASSWORD when configured (strongly
+    recommended: a role with SELECT-only grants, ideally on a replica);
+    falls back to the primary credentials otherwise — the session is still
+    forced READ ONLY at execution time either way (src/db_reader.py).
+    """
+    global _readonly_pool
+    if _readonly_pool is None:
+        ro_user = os.getenv("DB_RO_USER")
+        if not ro_user:
+            return _get_pool()
+        _readonly_pool = _build_pool(
+            "wholesale_banking_ro_pool",
+            ro_user,
+            os.getenv("DB_RO_PASSWORD", ""),
+            pool_size=3,
+        )
+    return _readonly_pool
 
 
 def get_db_connection():
@@ -61,3 +83,8 @@ def get_db_connection():
         mysql.connector.connection.MySQLConnection
     """
     return _get_pool().get_connection()
+
+
+def get_readonly_db_connection():
+    """Pooled connection for chat-generated SQL (read-only credentials if set)."""
+    return _get_readonly_pool().get_connection()
