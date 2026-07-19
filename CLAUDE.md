@@ -15,8 +15,9 @@ The app is fully DB-backed end to end: tab content is narrated from rows
 fetched deterministically out of the `wholesale` MySQL/MariaDB database
 (never invented), charts render real view rows, RM search resolves to a
 client picker, and the chat assistant answers data questions through a
-guarded NL2SQL pipeline. See "Implemented so far" below for the module map;
-the only remaining designed-but-unbuilt piece is the rules layer.
+guarded NL2SQL pipeline, and a deterministic rules layer decides what the
+narration emphasizes. See "Implemented so far" below for the module map —
+the designed architecture is fully implemented.
 
 ## Repository structure
 
@@ -32,6 +33,7 @@ Wholesale_banking/
 │   ├── schema_catalog.py           # DDL -> per-table metadata docs (chat path)
 │   ├── schema_retriever.py         # Schema-slice retrieval (embeddings / lexical)
 │   ├── sql_guardrails.py           # sqlglot validation of generated SQL
+│   ├── rules_layer.py              # Deterministic thresholds/top-N/date-window highlights
 │   ├── chart_generator.py          # Plotly charts built from db_reader chart-view payloads
 │   ├── db_reader.py                # Deterministic view-fetch layer + client/RM code resolution
 │   └── utils.py                    # client code validation/formatting
@@ -221,6 +223,14 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
   failure, then a graceful refusal. General product questions bypass the DB
   (`NO_QUERY`) but are forbidden from stating client figures.
 
-## Not yet implemented
-
-- Rules layer (thresholds/filters between SQL fetch and LLM narration).
+- **Rules layer between fetch and narration.** `src/rules_layer.py` runs
+  deterministic, threshold-driven rules over the fetched payload
+  (`RULES_CONFIG` holds every tunable in one place): NPA share, limit
+  utilization, covenant breaches, concentration risk, near-term maturities,
+  stale contact, expired documents, open escalations, low feedback,
+  cross-sell potential. Each finding is an auditable
+  `{rule, severity, message}` highlight the narrator must weave in
+  verbatim-in-substance; narration inputs are windowed (12-month growth
+  trend, 180-day/10-session discussion cap with a stale fallback) while
+  chart/UI payloads stay untouched. `generate_all_summaries()` returns the
+  rules output under `"rules"` for future UI badges.

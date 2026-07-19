@@ -23,6 +23,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from config.langchain_config import get_llm
 from src import db_reader
+from src.rules_layer import apply_rules
 
 # Narration must be deterministic prose over fixed numbers, not creative
 # writing — CLAUDE.md prescribes 0.1-0.2 for this path.
@@ -38,13 +39,18 @@ STRICT GROUNDING RULES:
 - If the data contains no records (empty list, all-zero totals), state that plainly in one sentence instead of describing activity that isn't there.
 - Monetary values are stored in INR Crores: format them as ₹**XX.XX CR**.
 - Format every number, percentage, and date as bold markdown (**...**).
-- Write 1-3 short paragraphs of flowing prose; use a list only when the data itself is a list of events."""
+- Write 1-3 short paragraphs of flowing prose; use a list only when the data itself is a list of events.
+- If the payload contains a "highlights" list, each entry was computed by a
+  deterministic business rule from this same data: weave every highlight's
+  message into the narrative (rephrased naturally, numbers unchanged), and
+  never contradict one."""
 
 
 class SummaryState(TypedDict):
     """State for the multi-agent summary narration"""
     client_code: str
     tab_data: dict          # db_reader.fetch_all_tab_data() payload
+    rules: dict             # rules_layer.apply_rules() output
     cms_summary: str
     rm_summary: str
     asset_summary: str
@@ -86,7 +92,7 @@ class MultiAgentSummaryGenerator:
                 f"Tab: {tab}\n"
                 f"Write the summary covering {coverage}.\n\n"
                 "Database rows retrieved for this client (JSON):\n"
-                f"{json.dumps(payload, indent=2, default=str)}"
+                f"{json.dumps(payload, indent=2, default=str, ensure_ascii=False)}"
             )),
         ]
         return self.llm.invoke(messages).content
@@ -99,6 +105,7 @@ class MultiAgentSummaryGenerator:
         """CMS tab: VW_CMS_SUMMARY — customer profile, contacts, touchpoints."""
         payload = {
             "cms_profile": state["tab_data"]["cms_summary"],
+            "highlights": state["rules"]["highlights"]["cms"],
         }
         return {"cms_summary": self._narrate(
             tab="Customer Management (CMS)",
@@ -118,6 +125,7 @@ class MultiAgentSummaryGenerator:
         payload = {
             "client": state["tab_data"]["client"],
             "rm_details": state["tab_data"]["rm_details_summary"],
+            "highlights": state["rules"]["highlights"]["rm_details"],
         }
         return {"rm_summary": self._narrate(
             tab="Relationship Manager Details & CRM Interactions",
@@ -134,7 +142,13 @@ class MultiAgentSummaryGenerator:
         """Asset Base tab: VW_ASSET_BASE_SUMMARY + the three asset chart views."""
         payload = {
             "asset_summary": state["tab_data"]["asset_base_summary"],
-            "asset_charts": state["tab_data"]["asset_charts"],
+            # growth_trend windowed by the rules layer for narration; the
+            # chart itself still renders the untouched fetch.
+            "asset_charts": {
+                **state["tab_data"]["asset_charts"],
+                "growth_trend": state["rules"]["narration_overrides"]["asset_growth_trend"],
+            },
+            "highlights": state["rules"]["highlights"]["asset"],
         }
         return {"asset_summary": self._narrate(
             tab="Asset Base",
@@ -152,6 +166,7 @@ class MultiAgentSummaryGenerator:
         payload = {
             "liability_summary": state["tab_data"]["liability_base_summary"],
             "liability_charts": state["tab_data"]["liability_charts"],
+            "highlights": state["rules"]["highlights"]["liability"],
         }
         return {"liability_summary": self._narrate(
             tab="Liability Base",
@@ -168,6 +183,7 @@ class MultiAgentSummaryGenerator:
         payload = {
             "client": state["tab_data"]["client"],
             "product_holdings": state["tab_data"]["product_holdings_summary"],
+            "highlights": state["rules"]["highlights"]["product"],
         }
         return {"product_holding_summary": self._narrate(
             tab="Overall Banking & Product Holdings",
@@ -182,7 +198,9 @@ class MultiAgentSummaryGenerator:
     def narrate_rm_discussion_summary(self, state: SummaryState) -> dict:
         """RM Discussion tab: VW_RM_DISCUSSION_SUMMARY sessions, newest first."""
         payload = {
-            "discussion_sessions": state["tab_data"]["rm_discussion_sessions"],
+            # Windowed + capped by the rules layer (narration input only).
+            "discussion_sessions": state["rules"]["narration_overrides"]["rm_discussion_sessions"],
+            "highlights": state["rules"]["highlights"]["discussion"],
         }
         return {"rm_discussion_summary": self._narrate(
             tab="RM-Client Discussions",
@@ -217,10 +235,12 @@ class MultiAgentSummaryGenerator:
             caller shows not-found; nothing ever reaches the LLM.
         """
         tab_data = db_reader.fetch_all_tab_data(client_code)
+        rules = apply_rules(tab_data)
 
         initial_state: SummaryState = {
             "client_code": client_code,
             "tab_data": tab_data,
+            "rules": rules,
             "cms_summary": "",
             "rm_summary": "",
             "asset_summary": "",
@@ -239,4 +259,5 @@ class MultiAgentSummaryGenerator:
             "product_holding_summary": final_state["product_holding_summary"],
             "rm_discussion_summary": final_state["rm_discussion_summary"],
             "tab_data": tab_data,
+            "rules": rules,
         }
