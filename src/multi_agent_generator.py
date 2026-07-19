@@ -10,7 +10,7 @@ already-fetched rows from the tab's database view as JSON context, runs at
 low temperature, and is instructed to never state a fact that isn't in the
 payload. Unknown client codes raise in db_reader before any LLM call.
 
-The five tab agents are independent, so the graph fans them out in parallel
+The six tab agents are independent, so the graph fans them out in parallel
 from START (each node returns a partial state update — required by LangGraph
 for concurrent branches, and the parallelization lever that replaces the old
 sequential 5-call chain).
@@ -45,6 +45,7 @@ class SummaryState(TypedDict):
     """State for the multi-agent summary narration"""
     client_code: str
     tab_data: dict          # db_reader.fetch_all_tab_data() payload
+    cms_summary: str
     rm_summary: str
     asset_summary: str
     liability_summary: str
@@ -53,19 +54,20 @@ class SummaryState(TypedDict):
 
 
 class MultiAgentSummaryGenerator:
-    """LangGraph fan-out of five narration agents, one per dashboard tab."""
+    """LangGraph fan-out of six narration agents, one per dashboard tab."""
 
     def __init__(self):
         self.llm = get_llm(temperature=NARRATION_TEMPERATURE)
 
         workflow = StateGraph(SummaryState)
+        workflow.add_node("cms_agent", self.narrate_cms_summary)
         workflow.add_node("rm_agent", self.narrate_rm_summary)
         workflow.add_node("asset_agent", self.narrate_asset_summary)
         workflow.add_node("liability_agent", self.narrate_liability_summary)
         workflow.add_node("product_agent", self.narrate_product_holding_summary)
         workflow.add_node("discussion_agent", self.narrate_rm_discussion_summary)
 
-        for node in ("rm_agent", "asset_agent", "liability_agent",
+        for node in ("cms_agent", "rm_agent", "asset_agent", "liability_agent",
                      "product_agent", "discussion_agent"):
             workflow.add_edge(START, node)
             workflow.add_edge(node, END)
@@ -92,6 +94,24 @@ class MultiAgentSummaryGenerator:
     # ------------------------------------------------------------------ #
     # Tab agents — each returns a partial state update (parallel-safe)
     # ------------------------------------------------------------------ #
+
+    def narrate_cms_summary(self, state: SummaryState) -> dict:
+        """CMS tab: VW_CMS_SUMMARY — customer profile, contacts, touchpoints."""
+        payload = {
+            "cms_profile": state["tab_data"]["cms_summary"],
+        }
+        return {"cms_summary": self._narrate(
+            tab="Customer Management (CMS)",
+            coverage=(
+                "who the client is (name, segment, group/parent company, "
+                "relationship-since date, annual turnover), their credit "
+                "rating with agency and date, the primary contact person and "
+                "registered address, current balances and active account "
+                "count, the most recent communication/call/meeting dates, and "
+                "document repository counts including any expired documents"
+            ),
+            payload=payload,
+        )}
 
     def narrate_rm_summary(self, state: SummaryState) -> dict:
         """RM Details tab: VW_RM_DETAILS_SUMMARY + client master row."""
@@ -182,13 +202,13 @@ class MultiAgentSummaryGenerator:
     def generate_all_summaries(self, client_code: str) -> dict:
         """
         Fetch the client's data (parallel SQL, src/db_reader.py) and narrate
-        all 5 tab summaries (parallel LLM calls via the LangGraph fan-out).
+        all 6 tab summaries (parallel LLM calls via the LangGraph fan-out).
 
         Args:
             client_code: APR_CLIENT_CODE to summarize
 
         Returns:
-            dict: the 5 summaries (same keys the UI already renders) plus
+            dict: the 6 summaries (same keys the UI already renders) plus
             "tab_data" — the raw fetched payload, so downstream consumers
             (charts, rules) don't have to refetch.
 
@@ -201,6 +221,7 @@ class MultiAgentSummaryGenerator:
         initial_state: SummaryState = {
             "client_code": client_code,
             "tab_data": tab_data,
+            "cms_summary": "",
             "rm_summary": "",
             "asset_summary": "",
             "liability_summary": "",
@@ -211,6 +232,7 @@ class MultiAgentSummaryGenerator:
         final_state = self._graph.invoke(initial_state)
 
         return {
+            "cms_summary": final_state["cms_summary"],
             "rm_summary": final_state["rm_summary"],
             "asset_summary": final_state["asset_summary"],
             "liability_summary": final_state["liability_summary"],
