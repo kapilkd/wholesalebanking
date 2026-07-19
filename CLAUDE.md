@@ -9,20 +9,14 @@ client identifier (`APR_CLIENT_CODE`, 8-14 chars, e.g. `APR12345678`, or
 `RM_CODE`, 6-7 chars) and the app renders 6 tabs of client information plus a
 free-form chat assistant.
 
-## Current state — important caveat
+## Current state
 
-**Every number and sentence the app currently shows is LLM-hallucinated.**
-There is no database anywhere in this repo. `src/multi_agent_generator.py`
-runs a 5-agent LangGraph chain (`app.py` → `MultiAgentSummaryGenerator`)
-where each agent's prompt literally asks GPT-4 to *"generate a comprehensive
-dummy summary"* with invented RM names, asset values, product holdings, etc.
-`src/chart_generator.py`'s charts are hardcoded static arrays that ignore the
-`client_code` argument entirely.
-
-This is a working prototype of the **UI and orchestration shape**, not of the
-data. The project's next major phase — described below — is to replace the
-hallucinated content with real SQL-backed data, keeping the LLM's role
-strictly limited to narrating retrieved facts.
+The app is fully DB-backed end to end: tab content is narrated from rows
+fetched deterministically out of the `wholesale` MySQL/MariaDB database
+(never invented), charts render real view rows, RM search resolves to a
+client picker, and the chat assistant answers data questions through a
+guarded NL2SQL pipeline. See "Implemented so far" below for the module map;
+the only remaining designed-but-unbuilt piece is the rules layer.
 
 ## Repository structure
 
@@ -33,8 +27,11 @@ Wholesale_banking/
 │   ├── langchain_config.py         # get_llm() factory (OpenAI via LangChain)
 │   └── db_config.py                # MySQL/MariaDB pooled connection factory (DB_* env vars)
 ├── src/
-│   ├── multi_agent_generator.py    # LangGraph 5-agent chain — currently 100% dummy-data generation
-│   ├── chatbot.py                  # Free-form chat assistant (no DB, no structured context)
+│   ├── multi_agent_generator.py    # LangGraph 6-agent parallel narration of db_reader payloads
+│   ├── chatbot.py                  # Grounded chat: schema-RAG + NL2SQL pipeline
+│   ├── schema_catalog.py           # DDL -> per-table metadata docs (chat path)
+│   ├── schema_retriever.py         # Schema-slice retrieval (embeddings / lexical)
+│   ├── sql_guardrails.py           # sqlglot validation of generated SQL
 │   ├── chart_generator.py          # Plotly charts built from db_reader chart-view payloads
 │   ├── db_reader.py                # Deterministic view-fetch layer + client/RM code resolution
 │   └── utils.py                    # client code validation/formatting
@@ -103,8 +100,8 @@ query with `WHERE APR_CLIENT_CODE = ?`. See `DB-Design-Schema/Views/README.md`.
 
 ### 2. The chat assistant — schema-RAG + NL2SQL
 
-`src/chatbot.py` currently answers free-form questions with zero grounding
-in real data. Classic vector-similarity RAG is the *wrong* tool here —
+(Implemented — see "Implemented so far". Design rationale kept below.)
+Classic vector-similarity RAG is the *wrong* tool here —
 banking numbers need to be exactly right, not semantically similar. The
 correct pattern:
 
@@ -210,7 +207,20 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
   the seeded `MATURITY_BUCKET`/`RATE_BUCKET` labels and "No data available"
   placeholders for empty row sets.
 
+- **Chat assistant is grounded (schema-RAG + NL2SQL).** `src/chatbot.py`
+  runs the strict pipeline: `src/schema_catalog.py` parses the design-source
+  DDL into per-table docs (74 tables: columns, comments, FK references);
+  `src/schema_retriever.py` retrieves the relevant slice (OpenAI embeddings
+  when a key is set, lexical fallback otherwise; always FK-closure + master
+  tables); SQL is generated at temperature 0, validated by
+  `src/sql_guardrails.py` (sqlglot: single SELECT only, table allow-list
+  from the slice, forced/clamped LIMIT), executed via
+  `db_reader.execute_readonly_sql()` (session forced READ ONLY, statement
+  timeout, optional `DB_RO_*` SELECT-only credentials), then the returned
+  rows are narrated under never-invent rules. One corrective retry on
+  failure, then a graceful refusal. General product questions bypass the DB
+  (`NO_QUERY`) but are forbidden from stating client figures.
+
 ## Not yet implemented
 
 - Rules layer (thresholds/filters between SQL fetch and LLM narration).
-- NL2SQL schema catalog / vector store for the chat assistant.
