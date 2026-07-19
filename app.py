@@ -589,13 +589,26 @@ if st.session_state.client_code and st.session_state.summaries_generated and st.
         </div>
     """, unsafe_allow_html=True)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📋 CMS",
         "👤 RM Details",
         "💼 Asset Base",
         "📈 Liability Base",
         "🏢 Product Holdings",
         "💬 RM Discussion"
     ])
+
+    with tab0:
+        st.markdown("""
+            <div class="tab-section-title">
+                <span>📋</span> Customer Management &amp; Profile
+            </div>
+        """, unsafe_allow_html=True)
+        # .get(): sessions generated before the CMS agent existed have no
+        # cms_summary key — degrade to a hint instead of a KeyError.
+        cms_text = st.session_state.client_summaries.get("cms_summary") or \
+            "CMS summary unavailable — re-submit the client code to regenerate."
+        st.markdown(f'<div class="summary-text">{cms_text}</div>', unsafe_allow_html=True)
 
     with tab1:
         st.markdown("""

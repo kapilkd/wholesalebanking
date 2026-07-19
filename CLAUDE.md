@@ -6,7 +6,7 @@ Guidance for Claude Code (and future contributors) working in this repository.
 
 A Streamlit-based wholesale banking chatbot/dashboard. A user submits a
 client identifier (`APR_CLIENT_CODE`, 8-14 chars, e.g. `APR12345678`, or
-`RM_CODE`, 6-7 chars) and the app renders 5 tabs of client information plus a
+`RM_CODE`, 6-7 chars) and the app renders 6 tabs of client information plus a
 free-form chat assistant.
 
 ## Current state — important caveat
@@ -28,7 +28,7 @@ strictly limited to narrating retrieved facts.
 
 ```
 Wholesale_banking/
-├── app.py                          # Streamlit UI: sidebar client lookup, 5 tabs, chat
+├── app.py                          # Streamlit UI: sidebar client lookup, 6 tabs, chat
 ├── config/
 │   ├── langchain_config.py         # get_llm() factory (OpenAI via LangChain)
 │   └── db_config.py                # MySQL/MariaDB pooled connection factory (DB_* env vars)
@@ -57,9 +57,7 @@ Wholesale_banking/
 └── requirements.txt                 # incl. mysql-connector-python (DB driver)
 ```
 
-The 5 UI tabs map 1:1 to `DB-Design-Schema` files 02-06 (`app.py` doesn't yet
-have a CMS tab — CMS is a planned addition, already covered by
-`01_CMS.sql`).
+The 6 UI tabs map 1:1 to `DB-Design-Schema` files 01-06 (CMS first).
 
 ## Target architecture: the SQL flow
 
@@ -187,7 +185,8 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
   code only); `fetch_all_tab_data()` fetches every tab summary view plus all
   six chart views in parallel and returns one JSON-safe,
   `lower_snake_case` payload for the rules/narration steps.
-- **`src/multi_agent_generator.py` narrates DB payloads.** The 5 tab agents
+- **`src/multi_agent_generator.py` narrates DB payloads.** The 6 tab agents
+  (incl. CMS)
   fan out in parallel from LangGraph `START` (partial state updates), each
   receiving only its tab's `db_reader` rows as JSON at temperature 0.1 under
   a strict never-invent narrator prompt. `generate_all_summaries()` keeps
@@ -215,4 +214,3 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
 
 - Rules layer (thresholds/filters between SQL fetch and LLM narration).
 - NL2SQL schema catalog / vector store for the chat assistant.
-- A CMS tab in `app.py` (schema exists in `01_CMS.sql`, UI does not yet).
