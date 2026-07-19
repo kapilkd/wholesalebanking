@@ -34,6 +34,7 @@ Wholesale_banking/
 │   ├── schema_retriever.py         # Schema-slice retrieval (embeddings / lexical)
 │   ├── sql_guardrails.py           # sqlglot validation of generated SQL
 │   ├── rules_layer.py              # Deterministic thresholds/top-N/date-window highlights
+│   ├── summary_cache.py            # In-process TTL+LRU cache for generated dashboards
 │   ├── chart_generator.py          # Plotly charts built from db_reader chart-view payloads
 │   ├── db_reader.py                # Deterministic view-fetch layer + client/RM code resolution
 │   └── utils.py                    # client code validation/formatting
@@ -236,3 +237,9 @@ parallelizing the currently-sequential LangGraph chain. Third: caching
   rules output under `"rules"`, and `app.py` renders it: per-tab severity
   badges (`render_highlight_badges()`) above each summary plus a
   warning-count "attention items" chip in the status row.
+- **Repeat lookups are cached.** `src/summary_cache.py` (thread-safe,
+  TTL via `SUMMARY_CACHE_TTL_SECONDS` default 600s, LRU-capped) stores the
+  full `generate_all_summaries()` result per client; repeat lookups skip
+  fetch + narration entirely. Results carry `generated_at`, shown as a
+  freshness chip; the sidebar "Refresh data" button invalidates the entry
+  and regenerates. Unknown codes are never cached.

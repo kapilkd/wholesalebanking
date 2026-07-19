@@ -15,6 +15,7 @@ from src.utils import validate_client_code, format_client_code
 from src.multi_agent_generator import MultiAgentSummaryGenerator
 from src.chart_generator import ChartGenerator
 from src import db_reader
+from src import summary_cache
 
 # Static wholesale banking summary text
 STATIC_WHOLESALE_INTRO = (
@@ -593,6 +594,13 @@ with st.sidebar:
                 <div class="type">{st.session_state.code_type or ''} · {'Analysis ready' if st.session_state.summaries_generated else 'Pending'}</div>
             </div>
         """, unsafe_allow_html=True)
+        if st.session_state.summaries_generated:
+            if st.button("🔄 Refresh data", use_container_width=True,
+                         help="Bypass the cache and regenerate from the database"):
+                summary_cache.invalidate(st.session_state.client_code)
+                st.session_state.summaries_generated = False
+                st.session_state.client_summaries = None
+                load_client_dashboard(st.session_state.client_code)
 
     st.markdown('<div class="sidebar-section-label">Powered by</div>', unsafe_allow_html=True)
     st.caption("Wholesale Automation Team - Mumbai")
@@ -624,12 +632,18 @@ if st.session_state.client_code and st.session_state.summaries_generated and st.
         f'<span class="chip chip-attention">⚠️ {warning_count} attention item(s)</span>'
         if warning_count else ''
     )
+    generated_at = st.session_state.client_summaries.get("generated_at") or ""
+    freshness_chip = (
+        f'<span class="chip chip-type">🕒 as of {generated_at.replace("T", " ")}</span>'
+        if generated_at else ''
+    )
     st.markdown(f"""
         <div class="chip-row">
             <span class="chip chip-code">🔑 {st.session_state.client_code}</span>
             <span class="chip chip-type">{st.session_state.code_type or 'CLIENT'}</span>
             {rm_chip}
             {attention_chip}
+            {freshness_chip}
             <span class="chip chip-status"><span class="chip-dot"></span> Analysis complete</span>
         </div>
     """, unsafe_allow_html=True)
