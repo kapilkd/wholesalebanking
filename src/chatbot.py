@@ -129,7 +129,7 @@ class WholesaleBankingChatbot:
             HumanMessage(content=(
                 f"Question: {question}\n\n"
                 f"SQL that was executed:\n{sql}\n\n"
-                f"Rows returned ({len(rows)}):\n{json.dumps(rows, default=str)}"
+                f"Rows returned ({len(rows)}):\n{json.dumps(rows, default=str, ensure_ascii=False)}"
             )),
         ])
         return response.content
